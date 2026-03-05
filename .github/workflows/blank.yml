@@ -44,14 +44,26 @@ jobs:
         ls -lh target.img
       shell: /usr/bin/bash -e {0}
       
-    - name: 手动补全DBY-W09的build.prop属性（核心修复）
+    - name: 手动补全DBY-W09的build.prop属性（修复AIK克隆问题）
       run: |
-        # 克隆AIK工具（用于提取/修改img中的build.prop）
-        git clone https://github.com/SebaUbuntu/AIK-Linux.git tmp/aik
+        # 方案1：尝试git克隆（浅克隆+跳过交互）
+        GIT_CLONE_OK=0
+        git clone --depth=1 https://github.com/SebaUbuntu/AIK-Linux.git tmp/aik 2>/dev/null && GIT_CLONE_OK=1
+        
+        # 方案2：若克隆失败，直接下载AIK-Linux压缩包（兜底）
+        if [ $GIT_CLONE_OK -ne 1 ]; then
+          echo "⚠️ git克隆失败，改用下载压缩包"
+          aria2c -o tmp/aik.zip https://github.com/SebaUbuntu/AIK-Linux/archive/refs/heads/master.zip
+          unzip -q tmp/aik.zip -d tmp/
+          mv tmp/AIK-Linux-master tmp/aik
+          rm -f tmp/aik.zip
+        fi
+        
+        # 赋予执行权限并解压img
         chmod +x tmp/aik/unpackimg.sh
-        # 解压img文件
         tmp/aik/unpackimg.sh target.img
-        # 查找build.prop并补全DBY-W09的核心属性
+        
+        # 查找并补全DBY-W09的build.prop属性
         BUILD_PROP_PATH=$(find tmp -name build.prop | head -1)
         if [ -f "$BUILD_PROP_PATH" ]; then
           # 补全缺失的ro.product.system.device（设备代号DBY-W09）
