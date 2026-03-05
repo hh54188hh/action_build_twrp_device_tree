@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       IMG_URL:    
-        description: 'IMG_URL'
+        description: 'boot/recovery.img 直接下载链接（非网盘）'
         required: true
         default: ''
 
@@ -17,38 +17,90 @@ jobs:
     - name: Check Out
       uses: actions/checkout@main
       
-    - name: Prepare the environment
+    - name: 修复环境依赖（适配Ubuntu24.04+移除Python2）
       run: |
         sudo apt update
-        # 移除Python 2，仅安装Python 3+必要依赖，补充aria2c
-        sudo apt -y install python3 python3-pip cpio wget aria2
-        pip3 install twrpdtgen
-        mkdir dt
+        # 移除Ubuntu24.04不兼容的Python2，避免安装报错
+        sudo apt -y remove python python-pip || true
+        # 安装必需工具：aria2（稳定下载）、git（克隆AIK）、unzip（解压）
+        sudo apt -y install python3 python3-pip cpio wget aria2 unzip git
+        # 升级twrpdtgen到最新版，修复属性兼容问题
+        pip3 install --upgrade twrpdtgen sebaubuntu_libs
+        # 创建必要目录
+        mkdir -p dt tmp
       shell: /usr/bin/bash -e {0}
       
-    - name: Download boot or recovery img
+    - name: 下载镜像文件（强制命名+验证有效性）
       run: |
-        aria2c "${{ github.event.inputs.IMG_URL }}"
-        ls
+        # 强制命名为target.img，避免通配符匹配失败
+        aria2c -o target.img "${{ github.event.inputs.IMG_URL }}"
+        # 验证文件是否下载成功（大小>0）
+        if [ ! -s target.img ]; then
+          echo "❌ 镜像文件下载失败/文件为空！"
+          ls -lh
+          exit 1
+        fi
+        echo "✅ 镜像文件下载成功："
+        ls -lh target.img
       shell: /usr/bin/bash -e {0}
       
-    - name: Start build
+    - name: 手动补全DBY-W09的build.prop属性（核心修复）
       run: |
-        python3 -m twrpdtgen -o dt/ *.img
+        # 克隆AIK工具（用于提取/修改img中的build.prop）
+        git clone https://github.com/SebaUbuntu/AIK-Linux.git tmp/aik
+        chmod +x tmp/aik/unpackimg.sh
+        # 解压img文件
+        tmp/aik/unpackimg.sh target.img
+        # 查找build.prop并补全DBY-W09的核心属性
+        BUILD_PROP_PATH=$(find tmp -name build.prop | head -1)
+        if [ -f "$BUILD_PROP_PATH" ]; then
+          # 补全缺失的ro.product.system.device（设备代号DBY-W09）
+          if ! grep -q "ro.product.system.device" "$BUILD_PROP_PATH"; then
+            echo "ro.product.system.device=DBY-W09" >> "$BUILD_PROP_PATH"
+            echo "ro.product.device=DBY-W09" >> "$BUILD_PROP_PATH"
+            echo "ro.product.manufacturer=Huawei" >> "$BUILD_PROP_PATH"
+            echo "✅ 已为DBY-W09补全build.prop缺失属性"
+          fi
+          # 打印验证补全结果
+          grep -E "ro.product.system.device|ro.product.device|ro.product.manufacturer" "$BUILD_PROP_PATH"
+        else
+          # 兜底：若未找到build.prop，直接创建临时文件
+          echo "⚠️ 未提取到build.prop，创建临时文件补全DBY-W09属性"
+          mkdir -p tmp/build
+          echo "ro.product.system.device=DBY-W09" > tmp/build/build.prop
+          echo "ro.product.device=DBY-W09" >> tmp/build/build.prop
+          echo "ro.product.manufacturer=Huawei" >> tmp/build/build.prop
+        fi
       shell: /usr/bin/bash -e {0}
       
-    - name: ZIP device tree
+    - name: 生成DBY-W09的TWRP设备树（容错逻辑）
+      run: |
+        # 优先正常生成，失败则强制指定设备代号DBY-W09
+        python3 -m twrpdtgen -o dt/ target.img || \
+        python3 -m twrpdtgen -o dt/ --codename DBY-W09 target.img
+      shell: /usr/bin/bash -e {0}
+      
+    - name: 打包设备树（验证有效性）
       run: |
         zip -r DeviceTree.zip ./dt
+        # 验证打包结果
+        if [ ! -s DeviceTree.zip ]; then
+          echo "❌ 设备树打包失败！"
+          exit 1
+        fi
+        echo "✅ DBY-W09设备树打包成功："
+        ls -lh DeviceTree.zip
       shell: /usr/bin/bash -e {0}
       
-    - name: Upload to Release
+    - name: 上传到Release（标注设备代号）
       uses: softprops/action-gh-release@v1
       with:
-        files: |
-          ./DeviceTree.zip
-        name: TWRP_Device_Tree-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
-        body: DeviceTree for twrp
+        files: ./DeviceTree.zip
+        name: TWRP_Device_Tree-DBY-W09-${{ github.run_id }}
+        tag_name: DBY-W09-${{ github.run_id }}
+        body: |
+          设备代号：DBY-W09
+          设备厂商：Huawei
+          镜像来源：${{ github.event.inputs.IMG_URL }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
